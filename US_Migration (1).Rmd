@@ -1,0 +1,1062 @@
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+**Student Number: 1125961 Word Count: 2900**
+
+# Political Polarisation and Networks of US Migration
+
+The following document explores US state migration in 2016. The analysis is conducted in the context of the 2016 Presidential Election and the role that state level political affiliation plays in affecting migration flows.
+
+Though there is already a wealth of literature exploring the correlation which exists between partisanship and migration, there has been only limited study on how this affects the domestic networks of US migration (Lieu, 2019). 
+
+Additionally, where research on US domestic migration does study the influence of political preferences, it is usually qualitative. It is necessary therefore to provide a quantitative perspective alongside studies such as that conducted by McDonald (2011), which suggested that at the district level, individuals will typically sort themselves according to their political values.
+
+Similarly, as US partisanship increases, it is critical that traditional push/pull factors are re-assessed in this context. For example, the impact of real estate values on migration may vary according to partisanship as there is a tendency for buyers to overestimate the value of residential real estate when neighbours have matching political preferences (Carlson and Gimpell, 2015). 
+
+As such, the following research introduces the study of political affiliation into the US intra-state migration literature using common quantitative tools:
+
+•	Complex Network Analysis; and
+ 
+•	A spatial Interaction Model.
+ 
+Additionally, because the migration data is a representation of complex spatial interactions between an origin and destination, methodological consideration is given to the spatial heterogeneity in the data. As such, the Spatial Interaction Model is not limited to an OLS regression – but also its geographically weighted counterparts (Zhang, Jianquan, Cheng and Cheng Jin, 2019).
+ 
+The spatial interaction models are also broadened to incorporate additional push/pull variables into the analysis beyond Euclidean distance.
+
+*Download Required Libraries*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+library(censusapi)
+library(readr)
+library(tidyverse)
+library(tidycensus)
+library(igraph)
+library(knitr)
+library(corrplot)
+library(corrgram)
+library(rgdal)
+library(tidyverse)
+library(GWmodel)
+library(spdplyr)
+library(geojsonio)
+library(stplanr)
+library(sf)
+library(ggplot2)
+library(leaflet)
+library(SpatialPosition)
+library(stargazer)
+library(DescTools)
+library(tmap)
+require(gridExtra)
+library(grid)
+```
+
+*Set API Key For Census Downloads*
+*Note this is required to be done twice due to use of seperate API's*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+Sys.setenv(CENSUS_KEY= '5dc3854fc03ae75783dcbdbe2a9db1509f250cbf')
+census_api_key("5dc3854fc03ae75783dcbdbe2a9db1509f250cbf")
+```
+
+
+# Download and Tidy Census Data
+
+
+Data is retrieved via the US Census API for the year 2016. The data analysed is county data aggregated to the state level, with intra-state migration removed. 
+ 
+Though the raw data format represents volume of flows between states, this has been transformed so as to represent a percentage of total migration from a particular state. For example, if one in ten migrants from California went to New York, this number would appear as 10% in our dataset rather than one – by making this change it is possible to understand the role of less populous states in the network and not focus on a structure dictated purely by the size of a few states. Additionally, for the topological network analysis and interactive visualisation, weak ties (less than 5% of state migration) are removed since they do not represent a meaningful amount of migration, but do alter the topology of the structure in a way which makes information extraction far harder. 
+ 
+For analysis conducted with spatial interaction models, the complete set of raw inter-state migration volumes are analysed.
+ 
+Additionally, during the development of the spatial interaction models, other variables are downloaded for analysis. These variables are a reflection of the factors typically utilised in the broader migration literature Aldashev and Dietz, 2014; Charyyev and Gunes, 2019; Coen-Pirani, 2010; Molloy et al., 2011; Piras, 2017; Treyz et al., 1993):
+ 
+1)	Proportion of Population Employed
+  a.	Likely a pull/push factor since employment opportunities are thought to cause migration.
+   
+2)	Proportion of Population over 65
+  a.	Elderly populations are less likely to move, however there is research suggesting elderly communities may move to states with better welfare/ elderly care.
+   
+3)	Median Income
+  a.	As with employment levels, income can act as a pull/push factor as people move to improve their earning potential.
+   
+4)	State Population
+  a.	Regions with large populations have also been shown to act as a draw in the migration literature – and have been featured in many gravity models.
+
+
+
+*Begin by downloading a database of county migration flows.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+flows <- getCensus(
+          name = "acs/flows",
+          vintage= 2016, 
+          vars= c("MOVEDIN", "MOVEDOUT", "FULL1_NAME", "FULL2_NAME", "GEOID2"),
+          region = "county:*",
+          regionin = "state:*"
+          )
+```
+
+*Convert  datatypes of different columns and filter out regions which are not US states.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+flows$state <- as.numeric(flows$state)
+flows$MOVEDIN <- as.numeric(flows$MOVEDIN)
+flows$MOVEDOUT <- as.numeric(flows$MOVEDOUT)
+#Getting rid of geographies that are not in the USA or not at appropriate scale
+flows_USA <- flows %>% drop_na(GEOID2) %>% filter(GEOID2<57000) %>% filter(state<57)
+```
+
+*Tidy the column with county names so we can derive states.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+  #Splitting county/state columns in two
+flows_split <- flows_USA %>%
+  separate(FULL1_NAME, c("County_origin", "State_origin"), sep= ", ")
+flows_split <- flows_split %>%
+  separate(FULL2_NAME, c("County_destination", "State_destination"), sep= ", ")
+```
+
+*Remove the intra-state flows.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+#Getting rid of intra-state flows
+flows_split <- flows_split %>% filter(State_origin != State_destination)
+```
+
+*Aggregate the data.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+  #Aggregating data
+grouped_flows <- flows_split %>%
+    group_by(State_origin, State_destination)%>%
+    summarise(MOVEDIN = sum(MOVEDIN), MOVEDOUT = sum(MOVEDOUT))
+```
+
+*Convert to a dataframe.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+grouped_flows_df <- as.data.frame(grouped_flows)
+```
+
+*Change column names so appropriate for working with iGraph.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+flow_tidy<- grouped_flows_df %>% 
+  rename(
+    o = State_origin,
+    d = State_destination,
+  weight   = MOVEDOUT
+    )
+```
+
+*Drop moved in column - we are looking at outflows.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+flow_tidy = subset(flow_tidy, select = -c(MOVEDIN) )
+```
+
+*Create a dataframe which removes the flows equal to zero.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+flow_tidy_full <- flow_tidy
+
+flow_tidy[flow_tidy < 0] <- NA
+
+flow_tidy<- drop_na(flow_tidy)
+```
+
+*Calculate flows as a proportion of states total out migration.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+flow_sum <-aggregate(flow_tidy$weight, by=list(flow_tidy=flow_tidy$o), FUN=sum)
+flow_tidy<-merge(x = flow_tidy, y = flow_sum, by.x = "o",by.y = "flow_tidy", all = TRUE)
+flow_tidy$proportion <- flow_tidy$weight/flow_tidy$x
+flow_tidy <- subset(flow_tidy, select = -c(x, weight))
+flow_tidy<- flow_tidy %>% 
+rename(
+weight   = proportion
+)
+flow_tidy$weight <- flow_tidy$weight*100
+
+```
+
+*Download a spatial dataframe.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+Income <- get_acs(geography = "state", variables = "B19326_001E" , year = 2016,geometry = TRUE,shift_geo = FALSE)
+Income_shift <- get_acs(geography = "state", variables = "B19326_001E" , year = 2016,geometry = TRUE,shift_geo = TRUE)
+Income<- rename(Income, c("cmlad11cd" = "NAME"))
+Income<- Income %>% filter(GEOID<57)
+Income_shift<- rename(Income_shift, c("cmlad11cd" = "NAME"))
+Income_shift<- Income_shift %>% filter(GEOID<57)
+
+spdf <- as_Spatial(Income)
+spdf_shift <- as_Spatial(Income_shift)
+spdf.names<- spdf@data
+spdf.names.shift<- spdf_shift@data
+```
+
+*Download the winner of the 2016 election.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+urlfile="https://raw.githubusercontent.com/kshaffer/election2016/master/2016ElectionResultsByState.csv"
+
+election_2016<-read_csv(url(urlfile))
+
+election_2016$winner <- ifelse(election_2016$clintonVotes > election_2016$trumpVotes, "Dem", "Rep")
+
+election_2016$share <-election_2016$trumpVotes/ election_2016$totalVotes
+
+winner_2016 <-subset(election_2016, select = c(state,winner,share) )
+
+winner_2016$decile <- ntile(winner_2016$share, 10) 
+```
+
+
+# Political Affiliation
+
+
+The vote data for the 2016 Presidential election at the state level was then retrieved. The share of party vote in each state was used to determine which party won in that state. Using this information, the migration data was then split into three variants:
+
+•	A migration network containing flows between all states;
+ 
+•	A network containing flows between Republican states only; and
+ 
+•	A network containing flows between Democrat states only.
+ 
+The purpose of splitting the network in this way was to better understand the character of migration within states of the same political affiliation – and how this affected the structure of the network and the relative importance of nodes within the structure. For instance, would the importance of traditionally important migration factors dissipate when controlling for political affiliation, or could a node of lesser importance within the larger network, become more significant in the Republican/Democrat network.
+
+Similarly, for the spatial interaction model, the analysis of states is divided as follows:
+
+•	A migration model with flows between all states.
+ 
+•	A migration model with flows from Republican states to all states regardless of the destination’s political affiliation.
+ 
+•	A migration model with flows from Democrat states to all states regardless of the destination’s political affiliation.
+ 
+By modelling the spatial interaction in this way it is possible to assess whether the importance of traditionally important migration factors dissipate or increase when controlling for political affiliation.
+
+
+
+*Create dataframes of Republicans and Democrats.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+flow_vote <- merge(x = flow_tidy, y = winner_2016, by.x = "d",by.y = "state", all = TRUE)
+flow_vote <- merge(x = flow_vote, y = winner_2016, by.x = "o",by.y = "state", all = TRUE)
+flow_vote_1<-filter(flow_vote, weight>5)
+flow_vote_dem<-subset(flow_vote_1, winner.x!="Rep" & winner.y!="Rep")
+flow_vote_rep<-subset(flow_vote_1, winner.x!="Dem" & winner.y!="Dem")
+```
+
+*Convert Aggregate Series to a Network.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+net.all <-graph_from_data_frame(flow_vote, directed = TRUE, vertices = NULL)
+net.all_1 <-graph_from_data_frame(flow_vote_1, directed = TRUE, vertices = NULL)
+net.dem <-graph_from_data_frame(flow_vote_dem, directed = TRUE, vertices = NULL)
+net.rep <-graph_from_data_frame(flow_vote_rep, directed = TRUE, vertices = NULL)
+```
+
+
+# Community Detection in US Migration
+
+
+Though it arguably makes sense to begin the analysis by presenting the networks themselves, the communities identified within the networks structure are highly pertinent to the remainder of the essay and were partly responsible for the focus on political affiliation of states.
+
+The standard approach in complex network analysis is to view migration networks as being comprised of geographic areas with a close set of economic, historical, political, and cultural linkages (Kritz et al., 1992, Fawcett, 1989, Salt, 1989). Defining where one system ends and another begins is challenging, but can be achieved via the application of one of several community detection algorithms  which measure the connectivity between different subgroups of nodes (Ratti et al., 2010, Farmer and Fotheringham, 2011). In practice, this means directly optimising a modularity score to identify communities with the largest possible number of intra-connecting edges.
+
+By applying this methodology we can see the communities detected by the algorithm have an underlying spatial component. The communities suggest that migration tends to take place along contiguous borders, with distance being an important component. However, if we had not removed the weaker ties we would have potentially found very different communities.
+
+Interestingly, the clusters of communities which emerge appear relatively similar to the map of votes in the US 2016 Presidential election. For instance, we can see clusters of Democrat voters in the North East of the country, whilst the West coast also voted Democrat. Though the algorithm identifies additional communities (4 via the algorithm vs 2 for the election), communities 2 and 4 overlap with the Western and N.E Democrat vote, whilst 1 and 3 overlap with the republican vote (see Fig 2 for community labels).
+
+This suggests there is a political component to migration, or alternatively that political party affiliation is related to geography as well.
+
+*Create Clusters of Migration Patterns in the US*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+net.all.und <- as.undirected(net.all, 
+                             mode=c("mutual"),
+                             edge.attr.comb = igraph_opt("edge.attr.comb"))
+communities.net.all <- cluster_fast_greedy(net.all.und)
+
+# And convert it to a data.frame
+
+communities.net.all_membership <- membership(communities.net.all) %>%
+  unclass %>%                      # we first need to unclass the object
+  as.data.frame %>%                # we convert it to a dataframe
+  rename(community = ".") %>%      # rename the community column
+  rownames_to_column("cmlad11cd")  # we 'move' the rownames to a 
+                                   # new column in order to do a merge below
+```
+
+*Compare Statewide Vote in 2016 Presidential Election with Migration Clusters*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+wgs84 = '+proj=longlat +datum=WGS84'
+states <- spTransform(spdf_shift, CRS(wgs84) )
+
+Category_Map <- merge(x = states , y = communities.net.all_membership, by.x = "cmlad11cd",by.y = "cmlad11cd", duplicateGeoms = T)
+Presidential_election <- merge(x = states , y = winner_2016, by.x = "cmlad11cd",by.y = "state", duplicateGeoms = T)
+
+Category_Map$community <- as.factor(Category_Map$community)
+var <- "community"
+
+Migration<- tm_shape(Category_Map,projection = 2163) +
+  tm_polygons(var,
+    palette = c("2" = "#1a1273", "3" = "#d90d0d", "1"="#e87b6d", "4" = "#74c5e3"), 
+    border.col = "white", 
+    border.alpha = 1.0) +
+  tm_legend(legend.position = c("left", "bottom"))
+
+
+Votes<- tm_shape(Presidential_election,projection = 2163) +
+  tm_polygons("winner",
+    palette = c("Rep" = "#d90d0d", "Dem"="#1a1273"), 
+    border.col = "white", 
+    border.alpha = 1.0) +
+  tm_legend(legend.position = c("left", "bottom"))
+
+current.mode <- tmap_mode("plot")
+tmap_arrange(Votes, Migration)
+tmap_mode(current.mode)
+```
+
+
+# Map of US Migration
+
+To further explore visualisations of migration in their spatial form, domestic US migration flows are mapped onto an interactive plot of the United States. In this map, states are the nodes whilst the edges are the flow of migration between them – with darker lines indicating a greater share of that state’s total migration (which can be clicked on to see the actual share of that states migration represented by the edge).
+
+This map also allows you to select states dependent on who they voted for in the 2016 US election. Though the map can be a little hard to interpret, it is apparent that regardless of political affiliation there is a tendency for flows to be directed toward the more populous states. However, Republican flows to the N.E are limited, and with the exception of Florida and Texas Democrats do not tend to migrate to Republican states in any vast numbers.
+Again, although there appears to be a relationship between political affiliation and migration, the relationship is not taken as a given. Republican states tend to correlate with factors such as lower wealth, population density and education etc. – meaning there are many reasons migration from Democrat states may be less extensive. 
+ 
+
+*Plot Flows of US Migration*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+winner_map<- merge(x = Income , y = winner_2016, by.x = "cmlad11cd",by.y = "state", duplicateGeoms = T)
+
+pts <- coordinates(states)
+
+
+travel_network <- od2line(flow = flow_vote_1, zones = winner_map)
+
+travel_network$weight <- round(travel_network$weight,2)
+
+winner_map$share <- round(winner_map$share,2)*100
+
+```
+
+
+
+
+```{r,message=FALSE,warning=FALSE}
+
+
+Flow_pal <- colorNumeric("Greens", domain = travel_network$weight)
+
+pal <- pal <- colorFactor(c("#1a1273","#d90d0d"), domain = winner_map$winner)
+
+popup <- paste0("State: ", winner_map$cmlad11cd, "<br>", "Republican Vote Share: ","<br>", winner_map$share,"%")
+
+popup_1 <- paste0( travel_network$o, "<br>", "to ", travel_network$d,"<br>", "is",  "<br>",travel_network$weight, "%", "<br>", "of the state's migration")
+
+
+travel_network$la.groups[travel_network$winner.y == "Rep"] = "Republican"
+travel_network$la.groups[travel_network$winner.y == "Dem"] = "Democrat"
+
+winner_map %>%
+    st_transform(crs = "+init=epsg:4326") %>%
+    leaflet(width = "100%") %>%
+    addProviderTiles(provider = "CartoDB.Positron") %>%
+    addPolygons(popup = popup,
+                stroke = TRUE,
+                smoothFactor = 0,
+                fillOpacity = 0.7,
+                fillColor  = ~ pal(winner),
+                color = "white",
+                weight = 1,
+                opacity = 0.5,
+                dashArray = "3",
+                highlightOptions = highlightOptions(color = "white", 
+                                        weight = 5))   %>%
+    addPolylines(
+    popup = popup_1,
+    data = travel_network,
+    weight = 1, 
+    color = ~Flow_pal(weight),
+    opacity = .8, # as above
+    group = travel_network$la.groups,
+    highlightOptions = highlightOptions(color = "green", 
+                                        weight = 5)) %>%
+    addLegend("topright",
+              pal = Flow_pal,
+              values = travel_network$weight,
+              title = "Migration Flows (%)",
+              group = travel_network$la.groups) %>%
+  addLayersControl(
+    position = "bottomleft",
+    overlayGroups = unique(travel_network$la.groups),
+      options = layersControlOptions(
+      collapsed = FALSE)) %>%
+  addLegend("bottomright", 
+              pal = pal, 
+              values = ~ winner,
+              title = "2016 Election Outcome",
+              opacity = 1) %>%
+    setView(lat = 39.8, lng = -98.6, zoom = 04)
+             
+```
+
+
+# Network Topology
+
+Moving on, we can now begin to look explicitly at the networks created and their respective topologies. Once again, it is important to note that had we left in the weak migration ties it would be very difficult to extract information from the networks topology since all nodes would be connected to some degree. 
+
+Conversely, whilst it may be possible to remove nodes from the visualisations dependent on their centrality weight (or similar), this drastically alters the network and thus a slightly uglier visualisation has been favoured due to concerns about loss of information.
+
+The first network shows the total US migration network. Here, the largest states by population are broadly the most central – with California, Texas, and Florida particularly notable. This is unsurprising as population is likely to lead to greater inflows of migrants even after we adjust our dataset. 
+Of these states, Florida and Texas are only marginally Republican states (with Florida a swing state), however California is amongst the most Democrat. The network is very closely clustered together, with periphery nodes such as Delaware still very close to the larger structure – even after we have removed the weak ties. 
+
+When we compare the Republican network against this, the most central nodes are as we would expect from the prior chart. However, the network is far sparser with many nodes having relatively few connections. The Democrat chart tells a similar story. In both instances it is far easier to identify clusters of communities than in the global network – these also appear tend toward geographical proximity.
+
+If we quantify some of the data around the network itself, we can see that the diameter of the global network is longer than either of the sub-networks. Interestingly, all three networks have negative assortativity, whilst the Democrat network is the most negative – perhaps reflecting the broad geographic distance between its nodes (South West to North East).
+
+Turning our analytical tools to the individual nodes within each network, there are a variety of measures we can utilise. Several of the more useful and interesting measures are presented below.
+
+Firstly, node “ Weighted In Degree” is presented to show how many edges are directed toward the state. In the network literature, this is typically taken as a measure of how popular a node is  (Wasserman and Faust, 1994, Opsahl et al., 2010). Unsurprisingly, we see the states identified above (California, Texas and Florida) have the highest score.
+
+These same states also have high Eigen centrality scores. This score implies they are highly influential and is calculated from how connected a node is to other high scoring nodes. One might assume that by splitting the network out there may be a re-rating, however all three states remain high scoring in their respective neighbourhoods. 
+
+Conversely, Montana does far worse in the Republican network than in the global network – likely reflecting the large geographic distance from the Southern Republican heartland. A thesis which is supported by the similar re-rating in the Eigen centrality score of its geographic neighbour Idaho and their outlier position in the visualisation of the network structures. 
+
+On the Democrat side there is the curious fact that New York actually falls in terms of Eigen centrality once we remove Republican votes. This too is likely a result of geography, with large Euclidean distances separating the populous Democrat states (New York and California) and therefore likely limiting the amount of migration.
+
+Unfortunately, because we are using proportions of migrants rather than volumes, certain measures of centrality such as “Weighted Out Degrees” are much less interesting. Elsewhere, measures such as Page Rank only provide limited information beyond that provided in the two aforementioned measures. These measures are therefore not explored further in this research.
+
+
+*Draw Network Structures of US Migration*
+
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+net.all_1$layout <-  layout_with_fr
+
+
+
+plot(net.all_1, # the graph to be plotted.
+     layout=layout.lgl,
+     main='US Migration Network', # specifies the title
+     vertex.label.font=2,   # the font of the name labels
+     vertex.label=V(net.all_1)$id, # no labels for the vertices
+     vertex.label.font=1, # the font type of the name labels (1 plain, 2 bold, 3, italic, 4 bold italic, 5 symbol)
+     vertex.label.cex=.5,   # specifies the size of the font of the labels. can also be made to vary
+     edge.arrow.size=0, # specifies the arrow size
+     vertex.size=strength(net.all_1)*0.2)
+
+```
+
+*Create network of Republican Migration.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+
+net.rep$layout <-  layout_with_fr
+
+plot(net.rep, # the graph to be plotted
+     main='Republican Migration Network', # specifies the title,
+     layout=layout.lgl,
+     vertex.frame.color='blue', # the colour of the border of the dots
+     vertex.label.font=2,   # the font of the name labels
+     vertex.label=V(net.rep)$id, # no labels for the vertices
+     vertex.label.font=1, # the font type of the name labels (1 plain, 2 bold, 3, italic, 4 bold italic, 5 symbol)
+     vertex.label.cex=.5,   # specifies the size of the font of the labels. can also be made to vary
+     edge.arrow.size=0, # specifies the arrow size
+     vertex.size=strength(net.rep)*0.2) # defines the node size based on weighted degree centrality
+```
+
+*Create network of Democrat Migration.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+
+net.dem$layout <-  layout_with_fr
+
+plot(net.dem, # the graph to be plotted
+     main='Democrat Migration Network', # specifies the title,
+     layout=layout.lgl,
+     vertex.frame.color='blue', # the colour of the border of the dots
+     vertex.label.font=2,   # the font of the name labels
+     vertex.label=V(net.rep)$id, # no labels for the vertices
+     vertex.label.font=1, # the font type of the name labels (1 plain, 2 bold, 3, italic, 4 bold italic, 5 symbol)
+     vertex.label.cex=.5,   # specifies the size of the font of the labels. can also be made to vary
+     edge.arrow.size=0, # specifies the arrow size
+     vertex.size=strength(net.dem)*0.2) # defines the node size based on weighted degree centrality
+```
+
+
+
+*Examine Topological Features of the Networks*
+
+
+Measure               Total             Republican           Democrat
+-----------------   ---------          -------------       -------------
+Diameter               9                    9                   8
+Avg Path Length       3.5                  2.9                 2.5
+Network Density       0.1                  0.1                 0.1
+Transitivity          0.4                  0.4                 0.3
+Reciprocity           0.5                  0.5                 0.5
+Assortativity        -0.1                 -0.1                -0.3
+
+
+*Calculate centrality measures of US network.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+# Weighed in-degree centrality
+Weighted.In.Degree <- graph.strength(net.all, mode = "in")
+
+# Weighed out-degree centrality
+Weighted.Out.Degree <- graph.strength(net.all, mode = "out")
+
+# Weighed degree centrality
+Weighted.Degree <- graph.strength(net.all, mode = "all")
+
+
+# Eigenvector centrality
+Eigen.Centrality <- eigen_centrality(net.all)
+
+# page rank centrality
+Page.Rank <- page_rank(net.all)
+```
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+names <- vertex_attr(net.all)[1]
+
+# We are interested in the second elements of the vertex_attr() as the first one includes the local authority codes. Try str(vertex_attr(net.all)) to see why.
+
+# Creates an object with all the centrality measures
+centralities <- data.frame(Weighted.In.Degree,Weighted.Out.Degree,Weighted.Degree , Eigen.Centrality$vector, Page.Rank$vector)
+
+centralities <- cbind(State = rownames(centralities), centralities)
+rownames(centralities) <- 1:nrow(centralities)
+```
+
+*Plot interesting centrality measures as bar charts.*
+
+```{r}
+par(mfrow=c(2,1)) 
+
+p<- ggplot(centralities, aes(x=State, y=Weighted.In.Degree)) + 
+  geom_bar(stat="identity", fill="steelblue")+
+  theme_minimal()+ 
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_fill_brewer(palette = "Set1") +
+  theme(legend.position="none") +
+  ylab("Weighted In Degree") +
+  ggtitle("US Weighted In Degree")
+
+c <- ggplot(centralities, aes(x=State, y=Eigen.Centrality.vector)) + 
+  geom_bar(stat="identity", fill="steelblue")+
+  theme_minimal()+ 
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_fill_brewer(palette = "Set1") +
+  theme(legend.position="none") +
+  ylab("Eigen Centrality") +
+  ggtitle("US Eigen Centrality")
+
+grid.arrange(p, c, nrow=2 )
+```
+
+
+*Calculate centrality measures of Republican network.*
+
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+# Weighed in-degree centrality
+Weighted.In.Degree_1 <- graph.strength(net.rep, mode = "in")
+
+# Weighed out-degree centrality
+Weighted.Out.Degree_1 <- graph.strength(net.rep, mode = "out")
+
+# Weighed degree centrality
+Weighted.Degree_1 <- graph.strength(net.rep, mode = "all")
+
+# The function betweenness() calculates betweenness centrality. As before
+Betweeness_1 <- betweenness(net.rep, weights = NA)
+
+# Eigenvector centrality
+Eigen.Centrality_1 <- eigen_centrality(net.rep)
+
+# page rank centrality
+Page.Rank_1 <- page_rank(net.rep)
+```
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+names_1 <- vertex_attr(net.rep)[1]
+
+# We are interested in the second elements of the vertex_attr() as the first one includes the local authority codes. Try str(vertex_attr(net.all)) to see why.
+
+# Creates an object with all the centrality measures
+centralities_1 <- data.frame(Weighted.In.Degree_1,Weighted.Out.Degree_1,Weighted.Degree_1 ,Betweeness_1, Eigen.Centrality_1$vector, Page.Rank_1$vector)
+
+centralities_1 <- cbind(State = rownames(centralities_1), centralities_1)
+rownames(centralities_1) <- 1:nrow(centralities_1)
+```
+
+*Plot centrality measures of interest for Republican network.*
+
+```{r}
+par(mfrow=c(2,1)) 
+
+p<- ggplot(centralities_1, aes(x=State, y=Weighted.In.Degree_1)) + 
+  geom_bar(stat="identity", fill="steelblue")+
+  theme_minimal()+ 
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_fill_brewer(palette = "Set1") +
+  theme(legend.position="none") +
+  ylab("Weighted In Degree") +
+  ggtitle("Republican Weighted In Degree")
+
+c <- ggplot(centralities_1, aes(x=State, y=Eigen.Centrality_1.vector)) + 
+  geom_bar(stat="identity", fill="steelblue")+
+  theme_minimal()+ 
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_fill_brewer(palette = "Set1") +
+  theme(legend.position="none") +
+  ylab("Eigen Centrality") +
+  ggtitle("Republican Eigen Centrality")
+
+grid.arrange(p, c, nrow=2 )
+```
+
+
+*Calculate centrality measures of Democrat network.*
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+# Weighed in-degree centrality
+Weighted.In.Degree_2 <- graph.strength(net.dem, mode = "in")
+
+# Weighed out-degree centrality
+Weighted.Out.Degree_2 <- graph.strength(net.dem, mode = "out")
+
+# Weighed degree centrality
+Weighted.Degree_2 <- graph.strength(net.dem, mode = "all")
+
+# The function betweenness() calculates betweenness centrality. As before
+Betweeness_2 <- betweenness(net.dem, weights = NA)
+
+# Eigenvector centrality
+Eigen.Centrality_2 <- eigen_centrality(net.dem)
+
+# page rank centrality
+Page.Rank_2 <- page_rank(net.dem)
+```
+
+```{r,results='hide',message=FALSE,warning=FALSE}
+names_2 <- vertex_attr(net.dem)[1]
+
+# We are interested in the second elements of the vertex_attr() as the first one includes the local authority codes. Try str(vertex_attr(net.all)) to see why.
+
+# Creates an object with all the centrality measures
+centralities_2 <- data.frame(Weighted.In.Degree_2,Weighted.Out.Degree_2,Weighted.Degree_2 ,Betweeness_2, Eigen.Centrality_2$vector, Page.Rank_2$vector)
+
+centralities_2 <- cbind(State = rownames(centralities_2), centralities_2)
+rownames(centralities_2) <- 1:nrow(centralities_2)
+```
+
+*Plot centrality measures of interest for Democrat network.*
+
+```{r}
+par(mfrow=c(2,1)) 
+
+p<- ggplot(centralities_2, aes(x=State, y=Weighted.In.Degree_2)) + 
+  geom_bar(stat="identity", fill="steelblue")+
+  theme_minimal()+ 
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_fill_brewer(palette = "Set1") +
+  theme(legend.position="none") +
+  ylab("Weighted In Degree") +
+  ggtitle("Democrat Weighted In Degree")
+
+c <- ggplot(centralities_2, aes(x=State, y=Eigen.Centrality_2.vector)) + 
+  geom_bar(stat="identity", fill="steelblue")+
+  theme_minimal()+ 
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_fill_brewer(palette = "Set1") +
+  theme(legend.position="none") +
+  ylab("Eigen Centrality") +
+  ggtitle("Democrat Eigen Centrality")
+
+grid.arrange(p, c, nrow=2)
+```
+
+
+# Spatial Interaction Models
+
+
+Two different models are applied to each of the networks created above. The first is a traditional OLS regression, the second is a geographically weighted OLS regression. 
+
+The basic gravity model is as below. In this equation $T_{ij}$ is the total migration flows,$V_i * M_j$ represent the features included in the regression and $D_{ij}$ is the distance :
+
+
+$$T_{ij} = k \displaystyle \frac{V_i * M_j}{D_{ij}}$$
+
+
+Typically, we  work with logarithms on both sides of the equation and turn this into a linear model (with added variables to reflect the aforementioned data we downloaded earlier). Happily, this also removes the positive skew from the continuous variables in the equation. 
+
+Additionally, because in certain instances the flow of migrants is zero, we add 0.1 in order to model appropriately. 
+
+$$lnT_{ij} = lnk + \lambda ln(Employment)_i + \lambda ln(Employment)_j + \lambda ln(Trump Vote)_i + $$
+$$\lambda ln(Trump Vote)_j +\lambda ln(Over 65)_i + \lambda ln(Over 65)_j +  + lambda ln(Rent)_i +$$
+$$\lambda ln(Rent)_j + + lambda ln(Income)_i + \lambda ln(Income)_j + \lambda ln(Distance) + e_{ij}$$
+
+In this equation, the variables identified at the begining of the document are incorporated. They feature twice to represent the origin and destination state - since what works as a pull variable in one direction is almost certainly a push in the other.
+
+Unsurprisingly (given the variables were selected for their common usage in the migration literature), nearly all were identified as significant in the OLS regression. However, it is worth noting that their may be latent effects driving many of these variables. As previously noted, the share of Trump voters may well be the result of local employment opportunities etc.
+
+However, since we are attempting to control for some of these factors, we can inspect the variables of interest. In the OLS regression on the US migration network, we find that for each 1% increase in Trump voters there is a 0.48% increase in migration. Because both sides of the equation are in logs we cannot work in standard units of change, this means that if the share of Trump voters were to rise from 50% to 50.5% we would see a percentage increase in migration equal to the beta coefficient.
+
+With regard to the subnetworks, the Republican network does indeed have a higher beta coefficient than the Democrat, as one would expect. Conversely, the fact that the Trump vote share coefficient is positive in the Democrat dataset is less intuitive. Two possible conclusions arise, either Democrats are less partisan than Republicans when it comes to migration, or alternatively large states such as Florida and Texas overwhelm the results.
+
+There are other notable differences between the two subnetworks as well, for instance individuals in a Democrat states with an elderly population are far less likely to move than their Republican counterparts. This is plausibly because one would expect Democrat states to generally have a better welfare system than Republican – meaning they are less inclined to move.  
+
+In each network of migration the coefficient for distance is negative. As fits the stereotype, the impact of distance on the Republican network is greater than on the Democrat network. Though this suggests that Democrats are more willing to migrate over long distances – the impact of having the two most populous Democrat states  on opposite sides of the coast will likely have influenced this outcome. 
+
+Overall the models all have consistent and high R-squared values – which suggests the majority of variation is explained. However, because we have consistently identified spatial properties in the dataset, it is important to construct a model which can account for such.
+
+Subsequently, a geographically weighted regression is fitted to the datasets. In doing so, we can see that the role of politics becomes far less important across all three networks than it was in the OLS model. 
+
+Here we see allot of the prior analysis break down. For instance, an individual in a Democrat state is more likely to move to a state with a higher share of Trump votes than the median individual in a Republican state. However, the Democrats do remain more willing to travel long distances than their Republican counterparts.
+
+Perhaps most notable in the geographically weighted models however is that in the total US migration network, only population, Trump vote share and distance have coefficients which are practically significant. 
+
+It is also worth noting that because migration volume data is a count, more recent academic work has begun to utilise Poisson regressions as part of the Gravity model. For comparison, the model results for a Poisson based gravity model are are shown below however, because of computational limitations with geographically weighted variant - the output is not discussed.
+
+
+*Create distance matrix.*
+
+```{r si data, include=TRUE, results= 'markup', message=FALSE, warning = FALSE}
+
+spdf.d <- CreateDistMatrix(spdf, spdf, longlat = T)
+
+rownames(spdf.d) <- spdf$cmlad11cd
+colnames(spdf.d) <- spdf$cmlad11cd
+
+
+spdf.d <- as.data.frame.table(spdf.d, responseName = "value")
+
+spdf.d <- spdf.d %>% 
+  filter(Var1 != Var2)
+
+```
+
+
+*Download Relevant Census Variables*
+
+```{r, message=FALSE, warning = FALSE}
+download_census_variable <- function(variable, title) {
+  data <- get_acs(geography = "state", variables = variable , year = 2016,geometry = TRUE,shift_geo = FALSE)
+  data<- data %>% filter(GEOID<57)
+  data <-subset(data, select = c(NAME,estimate) )
+  return(data)
+}
+
+
+Employed <- download_census_variable("DP03_0004PE")
+Employed<- rename(Employed, c("cmlad11cd" = "NAME","Employed"="estimate"))
+
+Over_65 <- download_census_variable("DP02_0014PE")
+Over_65<- rename(Over_65, c("cmlad11cd" = "NAME","Over_65"="estimate"))
+
+Population <- download_census_variable("B00001_001E")
+Population<- rename(Population, c("cmlad11cd" = "NAME","Population"="estimate"))
+
+
+rent <- download_census_variable("B25031_001E","rent")
+rent<- rename(rent, c("cmlad11cd" = "NAME","rent"="estimate"))
+
+
+Income_1 <- download_census_variable("B19326_001E")
+Income_1 <- rename(Income_1, c("cmlad11cd" = "NAME","Income"="estimate"))
+
+```
+
+
+*Combine newly downloaded series with distance, vote, migration flows (including zero migrant flows) and income *
+
+```{r, message=FALSE, warning = FALSE}
+Total_File <- merge(flow_tidy_full, winner_2016, by.x = "o",
+                       by.y = "state",
+                       all.x = TRUE)
+
+Total_File <- merge(Total_File, winner_2016, by.x = "d",
+                       by.y = "state",
+                       all.x = TRUE)
+
+Total_File <- merge(Total_File, Income_1, by.x = "o",
+                       by.y = "cmlad11cd",
+                       all.x = TRUE)
+
+Total_File <- merge(Total_File, Income_1, by.x = "d",
+                       by.y = "cmlad11cd",
+                       all.x = TRUE)
+
+Total_File <- merge(Total_File, Employed, by.x = "o",
+                       by.y = "cmlad11cd",
+                       all.x = TRUE)
+
+Total_File <- merge(Total_File, Employed, by.x = "d",
+                       by.y = "cmlad11cd",
+                       all.x = TRUE)
+
+Total_File <- merge(Total_File, Over_65, by.x = "o",
+                       by.y = "cmlad11cd",
+                       all.x = TRUE)
+
+Total_File <- merge(Total_File, Over_65, by.x = "d",
+                       by.y = "cmlad11cd",
+                       all.x = TRUE)
+
+Total_File <- merge(Total_File, Population, by.x = "o",
+                       by.y = "cmlad11cd",
+                       all.x = TRUE)
+
+Total_File <- merge(Total_File, Population, by.x = "d",
+                       by.y = "cmlad11cd",
+                       all.x = TRUE)
+
+Total_File <- merge(Total_File, spdf.d, by.x=c("o", "d"), by.y=c("Var1", "Var2"))
+
+Total_File <- merge(rent,Total_File , by.x = "cmlad11cd",
+                       by.y = "o",
+                       all.x = TRUE)
+
+rent <- as.data.frame(rent)
+
+Total_File <- merge(Total_File,rent , by.x = "d",
+                       by.y = "cmlad11cd",
+                       all.x = TRUE)
+```
+
+
+*Create Democrat and Republican Dataframes for Regressions.*
+
+```{r, message=FALSE, warning = FALSE}
+Total_File_dem<-subset(Total_File, winner.y!="Rep")
+Total_File_rep<-subset(Total_File, winner.y!="Dem")
+```
+
+
+
+*OLS Model for US migration data.*
+
+```{r si_ols, include=TRUE, results= 'markup', message=FALSE, warning = FALSE}
+
+ols.model.total <- lm(log(weight+.5) ~ 
+                  log(share.x) + log(share.y) + log(Income.x) + log(Income.y)+ log(Employed.x)+ log(Employed.y) +log(Over_65.x)+log(Over_65.y)+log(Population.x)+log(Population.y)+(rent.x) +(rent.y)+log(value), 
+                data = Total_File)
+
+ols.model.dem <- lm(log(weight+.5) ~ 
+                  log(share.x) + log(share.y) + log(Income.x) + log(Income.y)+ log(Employed.x)+ log(Employed.y) +log(Over_65.x)+log(Over_65.y)+log(Population.x)+log(Population.y)+(rent.x) +(rent.y)+log(value), 
+                data = Total_File_dem)
+
+ols.model.rep <- lm(log(weight+.5) ~ 
+                  log(share.x) + log(share.y) + log(Income.x) + log(Income.y)+ log(Employed.x)+ log(Employed.y) +log(Over_65.x)+log(Over_65.y)+log(Population.x)+log(Population.y)+(rent.x) +(rent.y)+log(value), 
+                data = Total_File_rep)
+
+```
+
+
+*OLS Model Results*
+
+```{r stargazer, include=TRUE, results= 'asis', message=FALSE, warning = FALSE}
+ols<- stargazer(ols.model.total, ols.model.rep,ols.model.dem, type = "html",column.labels=c(" Global "," Republian "," Democrat "), covariate.labels=c("% Share of Trump Votes (Origin State)","% Share of Trump Votes (Dest State)", "Median Income (Origin State)","Median Income (Dest State)","% Working Age Employed (Origin State)","% Working Age Employed (Dest State)","% Over 65 (Origin State)","% Over 65 (Dest State)","Population (Origin State)","Population (Dest State)","Median Rent (Origin State)","Median Rent (Dest State)","Distance between States"),dep.var.labels= c("Migration","Migration"), omit.stat=c("LL","ser","f"))
+```
+
+
+*Create Poisson Model*
+
+```{r}
+glm.model.total <- glm((weight) ~ 
+                  log(share.x) + log(share.y) + log(Income.x) + log(Income.y)+ log(Employed.x)+ log(Employed.y) +log(Over_65.x)+log(Over_65.y)+log(Population.x)+log(Population.y)+log(rent.x) +log(rent.y)+log(value),  
+                 family = poisson(link = "log"), data = Total_File)
+
+glm.model.rep <- glm((weight) ~ 
+                  log(share.x) + log(share.y) + log(Income.x) + log(Income.y)+ log(Employed.x)+ log(Employed.y) +log(Over_65.x)+log(Over_65.y)+log(Population.x)+log(Population.y)+log(rent.x) +log(rent.y)+log(value),  
+                 family = poisson(link = "log"), data = Total_File_rep)
+
+glm.model.dem <- glm((weight) ~ 
+                  log(share.x) + log(share.y) + log(Income.x) + log(Income.y)+ log(Employed.x)+ log(Employed.y) +log(Over_65.x)+log(Over_65.y)+log(Population.x)+log(Population.y)+log(rent.x) +log(rent.y)+log(value),  
+                 family = poisson(link = "log"), data = Total_File_dem)
+```
+
+
+
+*Poisson Model Results*
+
+```{r stargazer1, include=TRUE, results= 'asis', message=FALSE, warning = FALSE}
+glm<-stargazer(glm.model.total, glm.model.rep,glm.model.dem, type = "html",column.labels=c(" Global "," Republian "," Democrat "), covariate.labels=c("% Share of Trump Votes (Origin State)","% Share of Trump Votes (Dest State)", "Median Income (Origin State)","Median Income (Dest State)","% Working Age Employed (Origin State)","% Working Age Employed (Dest State)","% Over 65 (Origin State)","% Over 65 (Dest State)","Population (Origin State)","Population (Dest State)","Median Rent (Origin State)","Median Rent (Dest State)","Distance between States"),dep.var.labels= c("Migration","Migration"), omit.stat=c("LL","ser","f"))
+```
+
+
+
+*Run GWR Model for US Migration Data*
+
+```{r, results=FALSE, warning=FALSE, comment=FALSE, warning=FALSE}
+Total_File_sp <- as_Spatial(Total_File)
+pts <- coordinates(Total_File_sp)
+distances<- gw.dist(dp.locat = pts)
+bw<- bw.gwr(log(weight+0.5) ~ 
+                  (share.x) + (share.y) + (Income.x) + (Income.y)+ (Employed.x)+ (Employed.y) +(Over_65.x)+(Over_65.y)+log(Population.x)+log(Population.y)+(rent.x) +(rent.y)+log(value), 
+                data = Total_File_sp, adaptive = T, dMat = distances, kernel = "gaussian")
+
+gwr.model <- gwr.basic(log(weight+0.5) ~ 
+                  (share.x) + (share.y) + (Income.x) + (Income.y)+ (Employed.x)+ (Employed.y) +(Over_65.x)+(Over_65.y)+log(Population.x)+log(Population.y)+(rent.x) +(rent.y)+log(value), 
+                data = Total_File_sp, adaptive=T,bw=bw, dMat=distances, kernel = "gaussian")
+```
+
+
+*Run GWR Model for Democrat Migration Data*
+
+```{r, results=FALSE, warning=FALSE, comment=FALSE, warning=FALSE}
+Total_File_dem_sp <- as_Spatial(Total_File_dem)
+pts <- coordinates(Total_File_dem_sp)
+distances<- gw.dist(dp.locat = pts)
+bw<- bw.gwr(log(weight+0.5) ~ 
+                  (share.x) + (share.y) + (Income.x) + (Income.y)+ (Employed.x)+ (Employed.y) +(Over_65.x)+(Over_65.y)+log(Population.x)+log(Population.y)+(rent.x) +(rent.y)+log(value), 
+                data = Total_File_dem_sp, adaptive = T, dMat = distances, kernel = "gaussian")
+
+gwr.model.dem <- gwr.basic(log(weight+0.5) ~ 
+                  (share.x) + (share.y) + (Income.x) + (Income.y)+ (Employed.x)+ (Employed.y) +(Over_65.x)+(Over_65.y)+log(Population.x)+log(Population.y)+(rent.x) +(rent.y)+log(value), 
+                data = Total_File_dem_sp, adaptive=T,bw=bw, dMat=distances, kernel = "gaussian")
+```
+
+*Run GWR Model for Republican Migration Data*
+
+```{r, results=FALSE, warning=FALSE, comment=FALSE, warning=FALSE}
+Total_File_rep_sp <- as_Spatial(Total_File_rep)
+pts <- coordinates(Total_File_rep_sp)
+distances<- gw.dist(dp.locat = pts)
+bw<- bw.gwr(log(weight+.5) ~ 
+                  log(share.x) + log(share.y) + log(Income.x) + log(Income.y)+ log(Employed.x)+ log(Employed.y) +log(Over_65.x)+log(Over_65.y)+log(Population.x)+log(Population.y)+(rent.x) +(rent.y)+log(value), 
+                data = Total_File_rep_sp, adaptive = T, dMat = distances, kernel = "gaussian")
+
+gwr.model.rep <- gwr.basic(log(weight+.5) ~ 
+                  log(share.x) + log(share.y) + log(Income.x) + log(Income.y)+ log(Employed.x)+ log(Employed.y) +log(Over_65.x)+log(Over_65.y)+log(Population.x)+log(Population.y)+(rent.x) +(rent.y)+log(value), 
+                data = Total_File_rep_sp, adaptive=T,bw=bw, dMat=distances, kernel = "gaussian")
+```
+
+
+
+
+
+
+
+
+*Summary of US Migration coefficient estimates:*
+
+   Coefficients                         1st Qu.      Median     3rd Qu.    
+   ----------------------------------  --------    ----------   ----------  
+   Intercept                            1.33         3.78        11.60
+   (%Trump Votes) - Origin State         0.01        0.56        1.09 
+   (%Trump Votes) - Dest State          0.52         1.20        1.73   
+   (Income) - Origin State              -0.00       -0.00        0.00
+   (Income) - Dest State                -0.00       -0.00       -0.00
+   (%Employed) - Origin State           -0.04       -0.00        0.01  
+   (%Employed) - Dest State             -0.04        0.01        0.03  
+   (%Over_65) - Origin State            -0.12       -0.07       -0.02  
+   (%Over_65) - Dest State              -0.10       -0.07       -0.06  
+   (Population) - Origin State          0.65         0.92        0.99
+   (Population) - Dest State            0.66         0.74        0.79
+   (distance)                          -1.32        -1.01       -0.82
+   
+
+*Summary of Republican Migration coefficient estimates:*
+
+   Coefficients                         1st Qu.      Median     3rd Qu.    
+   ----------------------------------  --------    ---------  ----------  
+   Intercept                            29.30         44.14      60.66
+   (%Trump Votes) - Origin State       0.10          0.43        0.70 
+   (%Trump Votes) - Dest State          0.78         1.00        1.42   
+   (Income) - Origin State              -3.18       -0.95        0.64
+   (Income) - Dest State                -3.18        -2.73      -1.34
+   (%Employed) - Origin State           -2.78        -0.69       1.68 
+   (%Employed) - Dest State             0.12          1.27       2.58
+   (%Over_65) - Origin State            -4.03        -1.76      -0.49
+   (%Over_65) - Dest State              -0.45         0.12       0.86
+   (Population) - Origin State           0.57         0.92       1.02
+   (Population) - Dest State             0.59         0.69       0.89 
+   (distance)                           -1.55        -1.33      -1.08 
+  
+
+
+
+ 
+ 
+ 
+ 
+
+  *Summary of Democrat Migration coefficient estimates:*
+
+   Coefficients                         1st Qu.      Median     3rd Qu.    
+   ----------------------------------  --------     ---------   -----------  
+   Intercept                            2.83          7.93        14.85
+   (%Trump Votes) - Origin State        -1.03        -0.35        0.45
+   (%Trump Votes) - Dest State           0.24         2.05        2.71 
+   (Income) - Origin State               -0.00       -0.00        0.00
+   (Income) - Dest State                -0.00        -0.00       -0.00
+   (%Employed) - Origin State           -0.05        -0.01        0.00
+   (%Employed) - Dest State             -0.06        -0.01        0.03
+   (%Over_65) - Origin State            -0.10        -0.05       -0.01
+   (%Over_65) - Dest State              -0.24        -0.18       -0.15 
+   (Population) - Origin State           0.74         0.92        0.98
+   (Population) - Dest State             0.54         0.57        0.60
+   (distance)                           -1.02        -0.74       -0.53
+
+
+
+
+
+
+# Conclusion
+
+
+Throughout this report we have tried to assess the role that state political affiliation plays in migration. To do so network analysis and spatial interaction models have been utilised. In the former, it was necessary to amend the dataset to assess proportional levels of migration, and it may be that this methodology should also have been maintained for analysis in the spatial interaction models.
+
+Nevertheless, it is clear from both segments of this essay that geography is a key component with regard to migration. To control for this the spatial interaction models were modified to include a geographically weighted component – which should to some degree reduce the impact of error terms resulting from spatial auto-correlation (Ramos, 2016).
+
+Most likely, the optimum approach for this study would have been to use county level datasets. The aggregate results given at the state level ignore key factors along the urban-rural divide, and thus statistics attributed to one region do not really affect the actual dynamics.
+
+Unfortunately, the size of the dataset means that running geographically weighted regressions would be very computationally expensive, so further work may need to be done in this area to control for spatial bias. Additionally, the narrow temporal window limits the conclusions which can be drawn – for example the impact of Trump’s election on the network may have greatly altered the topology compared with years earlier.
+
+
+# Bibliography
+
+Aldashev, A., Dietz, B., 2014. Economic and spatial determinants of interregional migration in Kazakhstan. Economic Systems 38, 379–396. https://doi.org/10.1016/j.ecosys.2013.10.004
+
+Charyyev, B., Gunes, M.H., 2019. Complex network of United States migration. Comput Soc Netw 6, 1. https://doi.org/10.1186/s40649-019-0061-6
+
+Coen-Pirani, D., 2010. Understanding gross worker flows across U.S. states. Journal of Monetary Economics 57, 769–784. Goldade, T., Charyyev, B., Gunes, M.H., 2018. Network Analysis of Migration Patterns in the United States, in: Cherifi, C., Cherifi, H., Karsai, M., Musolesi, M. (Eds.), Complex Networks & Their Applications VI, Studies in Computational Intelligence. Springer International Publishing, Cham, pp. 770–783. https://doi.org/10.1007/978-3-319-72150-7_62
+
+Fawcett, J. T. 1989. Networks, Linkages, and Migration Systems. International Migration Review, 23(3), 671–680.
+
+Gimpel JG, Hui IS., 2015. Seeking politically compatible neighbors? The role of neighborhood partisan composition in residential sorting. Political Geography. 48:130–142.
+
+
+Kritz, M. M., Lim, L. L. & Zlotnik, H. 1992. International Migration Systems: A Global Approach. Oxford, UK, Clarendon Press.
+
+Liu X, Andris C, Desmarais BA (2019) Migration and political polarization in the U.S.: An analysis of the county-level migration network. PLoS ONE 14(11): e0225405. https://doi.org/10.1371/journal.pone.0225405
+
+McDonald I. 2011. Migration and sorting in the American electorate: Evidence from the 2006 Cooperative Congressional Election Study. American Politics Research.;39(3):512–533.
+
+Molloy, R., Smith, C.L., Wozniak, A., 2011. Internal Migration in the United States. Journal of Economic Perspectives 25, 173–196. https://doi.org/10.1257/jep.25.3.173
+
+Opsahl, T., Agneessens, F. & Skvoretz, J. 2010. Node Centrality in Weighted Networks: Generalizing Degree and Shortest Paths. Social Networks, 32(3), 245–251.
+
+Piras, R., 2017. A long-run analysis of push and pull factors of internal migration in Italy. Estimation of a gravity model with human capital using homogeneous and heterogeneous approaches: Estimation of a gravity model with human capital for Italy. Papers in Regional Science 96, 571–602. https://doi.org/10.1111/pirs.12211
+
+Salt, J. 1989. A Comparative Overview of International Trends and Types, 1950–80. International Migration Review, 23(3), 431–456.
+
+Treyz, G.I., Rickman, D.S., Hunt, G.L., Greenwood, M.J., 1993. The Dynamics of U.S. Internal Migration. The Review of Economics and Statistics 75, 209–214. https://doi.org/10.2307/2109425
+
+Wasserman, S. & Faust, K. 1994. Social Network Analysis: Methods and Applications. Cambridge, UK, Cambridge University Press.
